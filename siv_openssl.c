@@ -38,6 +38,7 @@
 #include "sysincl.h"
 
 #include <openssl/evp.h>
+#include <openssl/err.h>
 
 #include "logging.h"
 #include "memory.h"
@@ -218,10 +219,9 @@ SIV_Encrypt(SIV_Instance instance,
 
   ok = EVP_EncryptInit_ex(ctx, instance->cipher, NULL, instance->key, iv);
 
-  if (ok && instance->algorithm == AEAD_AES_SIV_CMAC_256) {
-    /* Feed nonce as the first S2V associated data component */
+  /* Feed nonce as the first S2V associated data component */
+  if (ok && instance->algorithm == AEAD_AES_SIV_CMAC_256)
     ok = EVP_EncryptUpdate(ctx, NULL, &len, nonce, nonce_length);
-  }
 
   /* Only feed assoc as an S2V component when non-empty, matching Nettle/GnuTLS
      behaviour: an empty assoc is not counted as a separate S2V input. */

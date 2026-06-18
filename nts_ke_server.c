@@ -114,8 +114,7 @@ handle_client(int sock_fd, IPSockAddr *addr)
   /* Leave at least half of the descriptors which can handled by select()
      to other use */
   if (sock_fd > FD_SETSIZE / 2) {
-    DEBUG_LOG("Rejected connection from %s (%s)",
-              UTI_IPSockAddrToString(addr), "too many descriptors");
+    DEBUG_LOG("Rejected connection (%s)", "fd > FD_SETSIZE/2");
     return 0;
   }
 
@@ -299,8 +298,10 @@ open_socket(int family)
   int backlog, sock_fd;
   char *iface;
 
-  if (!SCK_IsIpFamilyEnabled(family))
+  if (!SCK_IsIpFamilyEnabled(family)) {
+    LOG(LOGS_DEBUG, "NTS-KE open_socket: IP family %d not enabled", family);
     return INVALID_SOCK_FD;
+  }
 
   CNF_GetBindAddress(family, &local_addr.ip_addr);
   local_addr.port = CNF_GetNtsServerPort();

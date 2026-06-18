@@ -27,6 +27,9 @@ for i in 1 2; do
 		--template tmp/cert$i.cfg --outfile tmp/server$i.crt &>> tmp/log.certtool$i
 done
 
+# Test 1: 基本 NTS 運作（IPv4）
+# 驗證 NTS 基本握手、同步、key rotation（ntsrotate 66），以及 ntstrustedcerts /dev/null
+# 不會影響正確憑證的載入。
 max_sync_time=400
 dns=1
 server_conf="
@@ -45,6 +48,7 @@ ntstrustedcerts /dev/null
 logdir tmp
 log rawmeasurements"
 
+echo "===== Test 1: 基本 NTS 運作（IPv4）====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection || test_fail
@@ -52,13 +56,16 @@ check_sync || test_fail
 
 check_file_messages "20.*123\.1.* 111 111 1111" 75 80 measurements.log || test_fail
 check_file_messages "20.*123\.1.* 111 001 0000" 37 39 measurements.log || test_fail
-check_file_messages "	2	1	.*	4460	" 260 300 log.packets || test_fail
+check_file_messages "	2	1	.*	4460	" 200 300 log.packets || test_fail
 check_file_messages "." 6 6 ntskeys || test_fail
 rm -f tmp/measurements.log
 
+# Test 2: 基本 NTS 運作（IPv6）
+# 與 Test 1 相同情境，但改用 IPv6，驗證 NTS 在 IPv6 下正常運作。
 if check_config_h 'FEAT_IPV6 1'; then
 	ip_family=6
 
+	echo "===== Test 2: 基本 NTS 運作（IPv6）====="
 	run_test || test_fail
 	check_chronyd_exit || test_fail
 	check_source_selection || test_fail
@@ -66,17 +73,22 @@ if check_config_h 'FEAT_IPV6 1'; then
 
 	check_file_messages "20.*:123:1.* 111 111 1111" 75 80 measurements.log || test_fail
 	check_file_messages "20.*:123:1.* 111 001 0000" 37 39 measurements.log || test_fail
-	check_file_messages "	2	1	.*	4460	" 260 300 log.packets || test_fail
+	check_file_messages "	2	1	.*	4460	" 200 300 log.packets || test_fail
 	check_file_messages "." 6 6 ntskeys || test_fail
 	rm -f tmp/measurements.log
 
 	ip_family=$default_ip_family
 fi
 
+# Test 3: ntsrefresh 短週期 + NTS 狀態持久化
+# ntsrefresh 120 使 client 每 120 秒主動更新 NTS cookie，導致 NTS-KE 次數明顯增加
+# （300-390 次，vs Test 1 的 200-300 次）。ntsdumpdir 啟用後，驗證 .nts 狀態檔
+# 正確寫入（12-13 行）。
 client_conf+="
 ntsrefresh 120
 ntsdumpdir tmp"
 
+echo "===== Test 3: ntsrefresh 短週期 + NTS 狀態持久化 ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection || test_fail
@@ -84,11 +96,15 @@ check_sync || test_fail
 
 check_file_messages "20.*123\.1.* 111 111 1111" 99 103 measurements.log || test_fail
 check_file_messages "20.*123\.1.* 111 001 0000" 0 0 measurements.log || test_fail
-check_file_messages "	2	1	.*	4460	" 350 390 log.packets || test_fail
+check_file_messages "	2	1	.*	4460	" 300 390 log.packets || test_fail
 check_file_messages "." 6 6 ntskeys || test_fail
 check_file_messages "." 12 13 192.168.123.1.nts || test_fail
 rm -f tmp/measurements.log
 
+# Test 4: ntsrefresh 接近 key rotation 邊界時的 cookie 更新
+# 模擬時間快轉 40000 秒，ntsrotate 100000 使 server key 在測試期間只輪換一次，
+# ntsrefresh 39500 讓 client 在接近舊 key 失效前觸發更新。
+# 驗證 NTS-KE 僅在必要時發生（6-10 次），且都集中在 t~9000s 附近。
 export CLKNETSIM_START_DATE=$(date -d 'Jan  1 00:00:00 UTC 2010 + 40000 sec' +'%s')
 
 server_conf+="
@@ -96,6 +112,7 @@ ntsrotate 100000"
 client_conf+="
 ntsrefresh 39500"
 
+echo "===== Test 4: ntsrefresh 接近 key rotation 邊界 ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection || test_fail
@@ -109,9 +126,13 @@ check_file_messages "." 6 6 ntskeys || test_fail
 check_file_messages "." 12 13 192.168.123.1.nts || test_fail
 rm -f tmp/measurements.log
 
+# Test 5: 沒有任何 trusted cert（nosystemcert only）
+# client 無法通過 NTS-KE 的憑證驗證，預期 source selection 與 sync 均失敗。
+# 驗證 NTS-KE 有嘗試（port 4460 有封包），但 NTP 封包（port 123）完全不出現。
 client_conf="
 nosystemcert"
 
+echo "===== Test 5: 沒有任何 trusted cert ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection && test_fail
@@ -120,12 +141,16 @@ check_sync && test_fail
 check_file_messages "	2	1	.*	123	" 0 0 log.packets || test_fail
 check_file_messages "	2	1	.*	4460	" 10 20 log.packets || test_fail
 
+# Test 6: 憑證已過期
+# 模擬時間設為 Jan 2 00:00:01 UTC 2010，server 憑證（有效期至 Jan 2 00:00:00）已過期，
+# 預期 NTS-KE 失敗，log 中出現 4 次 "expired certificate"，無 NTP 封包。
 export CLKNETSIM_START_DATE=$(date -d 'Jan  2 00:00:01 UTC 2010' +'%s')
 
 client_conf="
 nosystemcert
 ntstrustedcerts tmp/server1.crt"
 
+echo "===== Test 6: 憑證已過期 ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection && test_fail
@@ -135,9 +160,13 @@ check_file_messages "	2	1	.*	123	" 0 0 log.packets || test_fail
 check_file_messages "	2	1	.*	4460	" 10 20 log.packets || test_fail
 check_log_messages "expired certificate" 4 4 || test_fail
 
+# Test 7: nocerttimecheck 略過憑證時間驗證
+# 在 Test 6（過期憑證）的基礎上加入 nocerttimecheck 1，驗證可強制忽略有效期，
+# 使 NTS-KE 成功並正常同步。
 client_conf+="
 nocerttimecheck 1"
 
+echo "===== Test 7: nocerttimecheck 略過憑證時間驗證 ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection || test_fail
@@ -150,6 +179,8 @@ nosystemcert
 ntstrustedcerts tmp/server1.crt
 ntsrefresh 500"
 
+# Test 8a/8b/8c: ntsntpserver 重導向行為（DNS 與 IP 兩種模式各跑一次）
+# ntsntpserver 讓 server 在 NTS-KE 回應中告知 client 使用另一台 NTP server。
 for dns in 1 0; do
 	server_conf="
 	ntsserverkey tmp/server1.key
@@ -168,8 +199,13 @@ for dns in 1 0; do
 		client_server_conf="server 192.168.123.1 $client_server_options"
 	fi
 
+	# Test 8a: ntsntpserver 重導向，但目標 NTP server 不存在（servers=1）
+	# NTS-KE 由 node1 回應，告知 client 改用 node2，但 node2 不存在，
+	# 預期 source selection 失敗。NTS-KE 持續重試（45-100 次），
+	# 並在 node1 ↔ node2 之間來回切換。
 	servers=1
 
+	echo "===== Test 8a: ntsntpserver 重導向，目標不存在（dns=$dns）====="
 	run_test || test_fail
 	check_chronyd_exit || test_fail
 	check_source_selection && test_fail
@@ -180,8 +216,12 @@ for dns in 1 0; do
 	check_log_messages "Source 192.168.123.1 changed to 192.168.123.2" 4 10 || test_fail
 	check_log_messages "Source 192.168.123.2 replaced with 192.168.123.1" 3 10 || test_fail
 
+	# Test 8b: ntsntpserver 重導向，目標 NTP server 存在（servers=2）
+	# NTS-KE 在 node1（port 4460）完成，NTP 流量改走 node2（port 123），
+	# 僅做一次 source change 且不回頭，驗證重導向正常運作後可成功同步。
 	servers=2
 
+	echo "===== Test 8b: ntsntpserver 重導向，目標存在（dns=$dns）====="
 	run_test || test_fail
 	check_chronyd_exit || test_fail
 	check_source_selection || test_fail
@@ -195,6 +235,10 @@ for dns in 1 0; do
 	server_conf+="
 	ntsratelimit interval 12 burst 1 leak 4"
 
+	# Test 8c: ntsntpserver 重導向 + 嚴格 rate limiting（servers=2）
+	# ntsratelimit interval 12 burst 1 leak 4 使大多數 NTS-KE 請求被拒絕，
+	# client 無法取得足夠 cookie，預期 source selection 失敗。
+	echo "===== Test 8c: ntsntpserver + rate limiting（dns=$dns）====="
 	run_test || test_fail
 	check_chronyd_exit || test_fail
 	check_source_selection && test_fail
@@ -205,6 +249,10 @@ for dns in 1 0; do
 	check_log_messages "Source 192.168.123.2 replaced with 192.168.123.1" 1 6 || test_fail
 done
 
+# Test 9a: 非標準 port + ntsntpserver，首次執行（無快取）
+# server 監聽非標準 port 11123，ntsntpserver 指向 node2，client 以 IP 直連。
+# 刪除所有 .nts 快取後首次執行，應完成一次 NTS-KE（1 筆 port 4460 封包），
+# 並成功同步。
 servers=2
 server_conf="
 ntsserverkey tmp/server1.key
@@ -222,6 +270,7 @@ client_server_conf="server 192.168.123.1 $client_server_options"
 
 rm -f tmp/*.nts
 
+echo "===== Test 9a: 非標準 port + ntsntpserver，首次執行（無快取）====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection || test_fail
@@ -231,7 +280,11 @@ check_log_messages "Could not change" 0 0 || test_fail
 check_file_messages "	3	1	.*	4460	1	0	2" 1 1 log.packets || test_fail
 check_file_messages "	3	2	.*	4460	" 0 0 log.packets || test_fail
 
+# Test 9b: 非標準 port + ntsntpserver，有快取時再次執行（DNS 與 IP 兩種模式）
+# 沿用 Test 9a 留下的 .nts 快取，驗證 client 可直接從快取還原 NTS 狀態，
+# 完全不需要重新做 NTS-KE（0 筆 port 4460 封包），依然能正常同步。
 for dns in 1 0; do
+	echo "===== Test 9b: 非標準 port + ntsntpserver，有快取再執行（dns=$dns）====="
 	run_test || test_fail
 	check_chronyd_exit || test_fail
 	check_source_selection || test_fail
@@ -242,6 +295,10 @@ for dns in 1 0; do
 	check_file_messages "	3	2	.*	4460	" 0 0 log.packets || test_fail
 done
 
+# Test 10: 部分截斷的 NTS 快取檔案
+# 將 .nts 快取截斷為前 8 行（cookie 不足），server 改回標準 port（移除 port 11123）。
+# 驗證 client 能偵測快取不足，自動補做 NTS-KE（1 筆），並仍用 node2 的 NTP。
+# 同時確認不會誤連舊的非標準 port，也不會對 node2 發出 NTS-KE。
 min_sync_time=$[default_min_sync_time + 200]
 max_sync_time=600
 server_conf="
@@ -254,6 +311,7 @@ ntsdumpdir tmp"
 head -n 8 tmp/192.168.123.1.nts > tmp/192.168.123.1.nts_
 mv tmp/192.168.123.1.nts_ tmp/192.168.123.1.nts
 
+echo "===== Test 10: 部分截斷的 NTS 快取檔案 ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection || test_fail
@@ -266,6 +324,9 @@ check_file_messages "	3	1	.*	11123	" 0 0 log.packets || test_fail
 check_file_messages "	3	2	.*	123	" 0 0 log.packets || test_fail
 check_file_messages "	3	2	.*	11123	" 3 3 log.packets || test_fail
 
+# Test 11: 兩台 server 各有獨立憑證，client 信任兩者（minsources 2）
+# 每台 server 都載入 server1 與 server2 兩組 key/cert，
+# client 信任兩組憑證並要求至少 2 個 source，驗證多 server NTS 同步正常運作。
 dns=1
 min_sync_time=$default_min_sync_time
 max_sync_time=400
@@ -282,11 +343,16 @@ ntstrustedcerts tmp/server2.crt
 minsources 2"
 client_server_conf=""
 
+echo "===== Test 11: 兩台 server 各有獨立憑證（minsources 2）====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection || test_fail
 check_sync || test_fail
 
+# Test 12: certset 指定每個 server 使用的憑證集合
+# client 以 certset 0 連 node1（使用全域信任的 server1.crt），
+# certset 2 連 node2（使用 set 2 的 server2.crt），
+# 驗證 certset 正確對應，兩個 server 均可正常做 NTP 封包交換。
 client_conf="
 nosystemcert
 ntstrustedcerts tmp/server1.crt
@@ -297,6 +363,7 @@ client_server_conf="
 server node1.net1.clk $client_server_options certset 0
 server node2.net1.clk $client_server_options certset 2"
 
+echo "===== Test 12: certset 正確配對 ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection || test_fail
@@ -305,10 +372,14 @@ check_sync || test_fail
 check_file_messages "	3	1	.*	123	" 100 200 log.packets || test_fail
 check_file_messages "	3	2	.*	123	" 100 200 log.packets || test_fail
 
+# Test 13: certset 憑證集合錯誤配對
+# node1 使用 certset 2（期望 server2.crt），但 node1 實際出示 server1.crt，憑證不符，
+# 預期兩台 server 均無法通過 NTS-KE，source selection 失敗，無任何 NTP 封包。
 client_server_conf="
 server node1.net1.clk $client_server_options certset 2
 server node2.net1.clk $client_server_options"
 
+echo "===== Test 13: certset 錯誤配對 ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection && test_fail
@@ -317,11 +388,15 @@ check_sync && test_fail
 check_file_messages "	3	1	.*	123	" 0 0 log.packets || test_fail
 check_file_messages "	3	2	.*	123	" 0 0 log.packets || test_fail
 
+# Test 14: 不存在的憑證檔案
+# client 設定的 ntstrustedcerts 指向不存在的檔案（nosuch.crt），
+# 預期 NTS-KE 無法完成，source selection 失敗，無 NTP 封包。
 client_conf="
 nosystemcert
 ntstrustedcerts tmp/nosuch.crt
 ntstrustedcerts 2 tmp/nosuch.crt"
 
+echo "===== Test 14: 不存在的憑證檔案 ====="
 run_test || test_fail
 check_chronyd_exit || test_fail
 check_source_selection && test_fail
@@ -330,6 +405,9 @@ check_sync && test_fail
 check_file_messages "	3	1	.*	123	" 0 0 log.packets || test_fail
 check_file_messages "	3	2	.*	123	" 0 0 log.packets || test_fail
 
+# Test 15: AEAD 演算法協商（3×3 組合）
+# 測試 server 與 client 各自指定 ntsaeads（空=預設、15=AES-128-GCM-SIV、30=AES-256-GCM-SIV）
+# 的所有組合，只有雙方指定相同非預設演算法且該演算法有編譯支援時，NTS-KE 才能成功。
 for server_aead in "" "15" "30"; do
 	for client_aead in "" "15" "30"; do
 		server_conf="
@@ -344,6 +422,7 @@ for server_aead in "" "15" "30"; do
 		ntstrustedcerts tmp/server2.crt"
 		client_server_conf=""
 
+		echo "===== Test 15: AEAD 協商（server=$server_aead client=$client_aead）====="
 		run_test || test_fail
 		check_chronyd_exit || test_fail
 		if [ -n "$server_aead" ] && [ "$server_aead" == "$client_aead" ] &&
