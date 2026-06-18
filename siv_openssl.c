@@ -219,14 +219,18 @@ SIV_Encrypt(SIV_Instance instance,
 
   ok = EVP_EncryptInit_ex(ctx, instance->cipher, NULL, instance->key, iv);
 
-  /* Feed nonce as the first S2V associated data component */
-  if (ok && instance->algorithm == AEAD_AES_SIV_CMAC_256)
-    ok = EVP_EncryptUpdate(ctx, NULL, &len, nonce, nonce_length);
-
-  /* Only feed assoc as an S2V component when non-empty, matching Nettle/GnuTLS
-     behaviour: an empty assoc is not counted as a separate S2V input. */
-  if (ok && assoc_length > 0)
-    ok = EVP_EncryptUpdate(ctx, NULL, &len, assoc, assoc_length);
+  if (instance->algorithm == AEAD_AES_SIV_CMAC_256) {
+    /* S2V component order matching Nettle/GnuTLS: [assoc, nonce, plaintext].
+       Feed assoc first (even if empty), then nonce. */
+    if (ok)
+      ok = EVP_EncryptUpdate(ctx, NULL, &len, assoc, assoc_length);
+    if (ok)
+      ok = EVP_EncryptUpdate(ctx, NULL, &len, nonce, nonce_length);
+  } else {
+    /* GCM-SIV: nonce is already set as IV; assoc is standard AAD. */
+    if (ok && assoc_length > 0)
+      ok = EVP_EncryptUpdate(ctx, NULL, &len, assoc, assoc_length);
+  }
 
   if (ok)
     ok = EVP_EncryptUpdate(ctx, ciphertext + instance->tag_length, &len,
@@ -288,11 +292,15 @@ SIV_Decrypt(SIV_Instance instance,
                               instance->tag_length,
                               (void *)ciphertext);
 
-  if (ok && instance->algorithm == AEAD_AES_SIV_CMAC_256)
-    ok = EVP_DecryptUpdate(ctx, NULL, &len, nonce, nonce_length);
-
-  if (ok && assoc_length > 0)
-    ok = EVP_DecryptUpdate(ctx, NULL, &len, assoc, assoc_length);
+  if (instance->algorithm == AEAD_AES_SIV_CMAC_256) {
+    if (ok)
+      ok = EVP_DecryptUpdate(ctx, NULL, &len, assoc, assoc_length);
+    if (ok)
+      ok = EVP_DecryptUpdate(ctx, NULL, &len, nonce, nonce_length);
+  } else {
+    if (ok && assoc_length > 0)
+      ok = EVP_DecryptUpdate(ctx, NULL, &len, assoc, assoc_length);
+  }
 
   if (ok)
     ok = EVP_DecryptUpdate(ctx, plaintext, &len,
