@@ -114,6 +114,7 @@ For better control, use the options below.
   --without-gnutls       Don't use gnutls even if it is available
   --without-nss          Don't use NSS even if it is available
   --without-tomcrypt     Don't use libtomcrypt even if it is available
+  --without-openssl      Don't use openssl even if it is available
   --disable-nts          Disable NTS support
   --disable-cmdmon       Disable command and monitoring support
   --disable-refclock     Disable reference clock support
@@ -225,6 +226,7 @@ feat_sechash=1
 try_nettle=1
 try_nss=1
 try_tomcrypt=1
+try_openssl=1
 feat_nts=1
 try_gnutls=1
 feat_rtc=1
@@ -243,7 +245,7 @@ feat_pps=1
 try_setsched=0
 try_lockmem=0
 feat_forcednsretry=1
-try_aes_gcm_siv=1
+try_aes_gcm_siv=0
 try_clock_gettime=1
 try_arc4random=1
 try_recvmmsg=1
@@ -383,6 +385,9 @@ do
     ;;
     --without-tomcrypt )
       try_tomcrypt=0
+    ;;
+    --without-openssl )
+      try_openssl=0
     ;;
     --disable-nts )
       feat_nts=0
@@ -907,6 +912,8 @@ fi
 
 HASH_OBJ="hash_intmd5.o"
 HASH_LINK=""
+OPENSSL_CFLAGS=""
+OPENSSL_LINK=""
 
 if [ $feat_sechash = "1" ] && [ "x$HASH_LINK" = "x" ]  && [ $try_nettle = "1" ]; then
   test_cflags="`pkg_config --cflags nettle`"
@@ -957,6 +964,40 @@ if [ $feat_sechash = "1" ] && [ "x$HASH_LINK" = "x" ] && [ $try_gnutls = "1" ]; 
       add_def HAVE_CMAC
       EXTRA_OBJECTS="$EXTRA_OBJECTS cmac_gnutls.o"
       EXTRA_CLI_OBJECTS="$EXTRA_CLI_OBJECTS cmac_gnutls.o"
+    fi
+  fi
+fi
+
+if [ $feat_sechash = "1" ] && [ "x$HASH_LINK" = "x" ] && [ $try_openssl = "1" ]; then
+  test_cflags="`pkg_config --cflags openssl`"
+  test_link="`pkg_config --libs openssl`"
+  if [ "x$test_link" = "x" ]; then
+    test_link="-lcrypto"
+  fi
+  if test_code 'openssl' 'openssl/evp.h openssl/opensslv.h' \
+    "$test_cflags" "$test_link" \
+    'return EVP_MD_CTX_new() ? 1 : 0;'
+  then
+    HASH_OBJ="hash_openssl.o"
+    HASH_LINK="$test_link"
+    OPENSSL_CFLAGS="$test_cflags"
+    OPENSSL_LINK="$test_link"
+    MYCPPFLAGS="$MYCPPFLAGS $test_cflags"
+    add_def HAVE_OPENSSL
+    add_def FEAT_SECHASH
+
+    if test_code 'CMAC in openssl' 'openssl/evp.h openssl/opensslv.h' \
+      "$test_cflags" "$test_link" '
+        #if OPENSSL_VERSION_NUMBER >= 0x30000000L
+        EVP_MAC *m = EVP_MAC_fetch(NULL, "CMAC", NULL); EVP_MAC_free(m); return 1;
+        #else
+        #include <openssl/cmac.h>
+        return CMAC_CTX_new() ? 1 : 0;
+        #endif'
+    then
+      add_def HAVE_CMAC
+      EXTRA_OBJECTS="$EXTRA_OBJECTS cmac_openssl.o"
+      EXTRA_CLI_OBJECTS="$EXTRA_CLI_OBJECTS cmac_openssl.o"
     fi
   fi
 fi
@@ -1018,24 +1059,66 @@ if [ $feat_nts = "1" ] && [ $try_gnutls = "1" ]; then
         add_def HAVE_NETTLE_SIV_GCM
       fi
     else
-      if test_code 'AES-SIV-CMAC in gnutls' 'gnutls/crypto.h' \
-        "$test_cflags" "$test_link $LIBS" '
-          return gnutls_aead_cipher_init((void *)1, GNUTLS_CIPHER_AES_128_SIV, (void *)2);'
-      then
-        EXTRA_OBJECTS="$EXTRA_OBJECTS siv_gnutls.o"
-        add_def HAVE_SIV
-        if [ $try_aes_gcm_siv = "1" ] && test_code 'AES-GCM-SIV in gnutls' \
-          'gnutls/crypto.h' "$test_cflags" "$test_link $LIBS" '
-            return gnutls_aead_cipher_init((void *)1, GNUTLS_CIPHER_AES_128_SIV_GCM,
-                                           (void *)2);'
-        then
-          add_def HAVE_GNUTLS_SIV_GCM
+      have_siv=0
+
+      if [ $have_siv = "0" ] && [ $try_openssl = "1" ]; then
+        if [ "$HASH_OBJ" = "hash_openssl.o" ]; then
+          ossl_siv_cflags="$OPENSSL_CFLAGS"
+          ossl_siv_link="$OPENSSL_LINK"
+        else
+          ossl_siv_cflags="`pkg_config --cflags openssl`"
+          ossl_siv_link="`pkg_config --libs openssl`"
+          if [ "x$ossl_siv_link" = "x" ]; then
+            ossl_siv_link="-lcrypto"
+          fi
         fi
-        if test_code 'gnutls_aead_cipher_set_key()' 'gnutls/crypto.h' \
-          "$test_cflags" "$test_link $LIBS" '
-            return gnutls_aead_cipher_set_key((void *)1, (void *)2);'
+        if test_code 'AES-SIV-CMAC in openssl' 'openssl/evp.h' \
+          "$ossl_siv_cflags" "$ossl_siv_link $LIBS" '
+            EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "AES-128-SIV", NULL);
+            int r = c ? 1 : 0;
+            EVP_CIPHER_free(c);
+            return r;'
         then
-          add_def HAVE_GNUTLS_AEAD_CIPHER_SET_KEY
+          have_siv=1
+          EXTRA_OBJECTS="$EXTRA_OBJECTS siv_openssl.o"
+          add_def HAVE_SIV
+          if [ "$HASH_OBJ" != "hash_openssl.o" ]; then
+            LIBS="$LIBS $ossl_siv_link"
+            MYCPPFLAGS="$MYCPPFLAGS $ossl_siv_cflags"
+          fi
+          if [ $try_aes_gcm_siv = "1" ] && test_code 'AES-GCM-SIV in openssl' \
+            'openssl/evp.h' "$ossl_siv_cflags" "$ossl_siv_link $LIBS" '
+              EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "AES-128-GCM-SIV", NULL);
+              int r = c ? 1 : 0;
+              EVP_CIPHER_free(c);
+              return r;'
+          then
+            add_def HAVE_OPENSSL_SIV_GCM
+          fi
+        fi
+      fi
+
+      if [ $have_siv = "0" ]; then
+        if test_code 'AES-SIV-CMAC in gnutls' 'gnutls/crypto.h' \
+          "$test_cflags" "$test_link $LIBS" '
+            return gnutls_aead_cipher_init((void *)1, GNUTLS_CIPHER_AES_128_SIV, (void *)2);'
+        then
+          have_siv=1
+          EXTRA_OBJECTS="$EXTRA_OBJECTS siv_gnutls.o"
+          add_def HAVE_SIV
+          if [ $try_aes_gcm_siv = "1" ] && test_code 'AES-GCM-SIV in gnutls' \
+            'gnutls/crypto.h' "$test_cflags" "$test_link $LIBS" '
+              return gnutls_aead_cipher_init((void *)1, GNUTLS_CIPHER_AES_128_SIV_GCM,
+                                             (void *)2);'
+          then
+            add_def HAVE_GNUTLS_SIV_GCM
+          fi
+          if test_code 'gnutls_aead_cipher_set_key()' 'gnutls/crypto.h' \
+            "$test_cflags" "$test_link $LIBS" '
+              return gnutls_aead_cipher_set_key((void *)1, (void *)2);'
+          then
+            add_def HAVE_GNUTLS_AEAD_CIPHER_SET_KEY
+          fi
         fi
       fi
     fi
@@ -1046,6 +1129,62 @@ if [ $feat_nts = "1" ] && [ $try_gnutls = "1" ]; then
       LIBS="$LIBS $test_link"
       MYCPPFLAGS="$MYCPPFLAGS $test_cflags"
       add_def FEAT_NTS
+    fi
+  fi
+fi
+
+if [ $feat_nts = "1" ] && [ $try_openssl = "1" ]; then
+  if ! grep '#define FEAT_NTS' config.h > /dev/null 2>&1; then
+    if [ "$HASH_OBJ" = "hash_openssl.o" ]; then
+      ossl_nts_cflags="$OPENSSL_CFLAGS"
+      ossl_nts_link="$OPENSSL_LINK"
+    else
+      ossl_nts_cflags="`pkg_config --cflags openssl`"
+      ossl_nts_link="`pkg_config --libs openssl`"
+      if [ "x$ossl_nts_link" = "x" ]; then
+        ossl_nts_link="-lssl -lcrypto"
+      fi
+    fi
+    if [ "x$ossl_nts_link" != "x-lcrypto" ]; then
+      ossl_nts_link_with_ssl="$ossl_nts_link"
+    else
+      ossl_nts_link_with_ssl="-lssl $ossl_nts_link"
+    fi
+    if test_code 'TLS1.3 in openssl' 'openssl/ssl.h openssl/tls1.h' \
+      "$ossl_nts_cflags" "$ossl_nts_link_with_ssl $LIBS" '
+        SSL_CTX *ctx = SSL_CTX_new(TLS_method());
+        int r = ctx != NULL && SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
+        if (ctx) SSL_CTX_free(ctx);
+        return r ? 1 : 0;'
+    then
+      if test_code 'AES-SIV-CMAC for NTS in openssl' 'openssl/evp.h' \
+        "$ossl_nts_cflags" "$ossl_nts_link_with_ssl $LIBS" '
+          EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "AES-128-SIV", NULL);
+          int r = c ? 1 : 0;
+          EVP_CIPHER_free(c);
+          return r;'
+      then
+        EXTRA_OBJECTS="$EXTRA_OBJECTS siv_openssl.o"
+        EXTRA_OBJECTS="$EXTRA_OBJECTS nts_ke_client.o nts_ke_server.o nts_ke_session.o tls_openssl.o"
+        EXTRA_OBJECTS="$EXTRA_OBJECTS nts_ntp_auth.o nts_ntp_client.o nts_ntp_server.o"
+        add_def HAVE_SIV
+        add_def FEAT_NTS
+        if [ "$HASH_OBJ" != "hash_openssl.o" ]; then
+          LIBS="$LIBS $ossl_nts_link_with_ssl"
+          MYCPPFLAGS="$MYCPPFLAGS $ossl_nts_cflags"
+        else
+          LIBS="$LIBS -lssl"
+        fi
+        if [ $try_aes_gcm_siv = "1" ] && test_code 'AES-GCM-SIV for NTS in openssl' \
+          'openssl/evp.h' "$ossl_nts_cflags" "$ossl_nts_link_with_ssl $LIBS" '
+            EVP_CIPHER *c = EVP_CIPHER_fetch(NULL, "AES-128-GCM-SIV", NULL);
+            int r = c ? 1 : 0;
+            EVP_CIPHER_free(c);
+            return r;'
+        then
+          add_def HAVE_OPENSSL_SIV_GCM
+        fi
+      fi
     fi
   fi
 fi
