@@ -183,6 +183,7 @@ check_cookies(NNC_Instance inst)
     }
 
     inst->num_cookies = 0;
+    DEBUG_LOG("Dropped cookies");
   }
 
   return inst->num_cookies > 0;
@@ -271,9 +272,8 @@ get_cookies(NNC_Instance inst)
   update_next_nke_attempt(inst, failed_start, now);
 
   /* Wait until the session stops */
-  if (NKC_IsActive(inst->nke)) {
+  if (NKC_IsActive(inst->nke))
     return 0;
-  }
 
   assert(sizeof (inst->cookies) / sizeof (inst->cookies[0]) == NTS_MAX_COOKIES);
 
@@ -331,8 +331,10 @@ NNC_PrepareForAuth(NNC_Instance inst)
     inst->siv = SIV_CreateInstance(inst->context.algorithm);
 
   if (!inst->siv ||
-      !SIV_SetKey(inst->siv, inst->context.c2s.key, inst->context.c2s.length))
+      !SIV_SetKey(inst->siv, inst->context.c2s.key, inst->context.c2s.length)) {
+    DEBUG_LOG("Could not set SIV key");
     return 0;
+  }
 
   inst->auth_ready = 1;
 
